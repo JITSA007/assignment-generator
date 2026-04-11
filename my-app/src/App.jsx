@@ -1,9 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Upload, Plus, RefreshCw, Send, FileSpreadsheet, 
-  Trash2, CheckCircle, Settings, Users, BookOpen, Download, Sparkles, Server, ClipboardCheck
+  Trash2, CheckCircle, Settings, Users, BookOpen, Download, Sparkles, Server, ClipboardCheck, FileImage, FileText, X
 } from 'lucide-react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Point the PDF tool to its required background worker file
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('bank');
@@ -31,6 +35,9 @@ export default function App() {
   // Form State - AI Grader
   const [gradingQuestion, setGradingQuestion] = useState('');
   const [studentAnswer, setStudentAnswer] = useState('');
+  const [studentFile, setStudentFile] = useState(null);
+  const [studentFileData, setStudentFileData] = useState(null);
+  const [studentFileType, setStudentFileType] = useState(null);
   const [gradingResult, setGradingResult] = useState(null);
   const [isGrading, setIsGrading] = useState(false);
 
@@ -146,13 +153,65 @@ export default function App() {
     }
   };
 
-  // --- Handler for AI Auto-Grader ---
+  // --- Handlers for AI Auto-Grader ---
+
+  const handleGraderFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setStudentFile(file);
+
+    if (file.type.startsWith('image/')) {
+      setStudentFileType('image');
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const base64Data = evt.target.result.split(',')[1];
+        setStudentFileData({
+          inlineData: { data: base64Data, mimeType: file.type }
+        });
+      };
+      reader.readAsDataURL(file);
+    } 
+    else if (file.type === 'application/pdf') {
+      setStudentFileType('pdf');
+      const reader = new FileReader();
+      reader.onload = async (evt) => {
+        const typedarray = new Uint8Array(evt.target.result);
+        try {
+          const pdf = await pdfjsLib.getDocument(typedarray).promise;
+          let fullText = "";
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += pageText + "\n";
+          }
+          setStudentFileData(fullText);
+        } catch (err) {
+          alert("Error reading PDF: " + err.message);
+          clearGraderFile();
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } 
+    else {
+      alert("Please upload an image (JPG/PNG) or a PDF file.");
+      clearGraderFile();
+    }
+  };
+
+  const clearGraderFile = () => {
+    setStudentFile(null);
+    setStudentFileData(null);
+    setStudentFileType(null);
+  };
   
   const handleGradeAnswer = async (e) => {
     e.preventDefault();
     if (!apiKey.trim()) return alert("Please enter your Gemini API Key in the Question Bank tab first.");
     if (!selectedModel) return alert("Please fetch and select an AI model in the Question Bank tab first.");
-    if (!gradingQuestion.trim() || !studentAnswer.trim()) return alert("Please enter both a question and the student's answer.");
+    if (!gradingQuestion.trim()) return alert("Please enter the question you asked the student.");
+    if (!studentAnswer.trim() && !studentFile) return alert("Please enter text or upload a file for the student's answer.");
 
     setIsGrading(true);
     setGradingResult(null);
@@ -161,13 +220,18 @@ export default function App() {
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: selectedModel });
 
-      const prompt = `
+      let promptText = `
         You are a supportive, expert teacher grading a student's answer.
         
         Question asked: "${gradingQuestion}"
-        Student's answer: "${studentAnswer}"
+        Student's Answer (Text provided): "${studentAnswer || 'See uploaded file.'}"
+      `;
 
-        Evaluate the answer out of 10 points. Provide feedback using the "Sandwich Method" (Appreciation, Correction, Encouragement).
+      if (studentFileType === 'pdf' && studentFileData) {
+        promptText += `\n\nStudent's Answer (Extracted from uploaded PDF):\n"${studentFileData}"`;
+      }
+
+      promptText += `\n\nEvaluate the student's complete answer out of 10 points based on the question. Provide feedback using the "Sandwich Method" (Appreciation, Correction, Encouragement).
         
         You MUST return ONLY a valid JSON object. Do not include markdown formatting like \`\`\`json.
         Format your response EXACTLY like this example:
@@ -179,7 +243,14 @@ export default function App() {
         }
       `;
 
-      const result = await model.generateContent(prompt);
+      let contents = [];
+      if (studentFileType === 'image' && studentFileData) {
+        contents = [promptText, studentFileData];
+      } else {
+        contents = [promptText];
+      }
+
+      const result = await model.generateContent(contents);
       let responseText = result.response.text();
       
       responseText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -189,7 +260,7 @@ export default function App() {
 
     } catch (error) {
       console.error(error);
-      alert(`Error grading answer: ${error.message}\n\nPlease check your API key and try again.`);
+      alert(`Error grading answer: ${error.message}\n\nPlease check your API key, ensure the model supports images if you uploaded one, and try again.`);
     } finally {
       setIsGrading(false);
     }
@@ -702,7 +773,7 @@ export default function App() {
                   <ClipboardCheck className="w-8 h-8" />
                 </div>
                 <h2 className="text-2xl font-bold text-gray-800 mb-2">AI Auto-Grader</h2>
-                <p className="text-gray-600">Paste a student's answer below to get instant "Sandwich Method" feedback.</p>
+                <p className="text-gray-600">Paste text, or upload an image/PDF of a student's answer to get instant "Sandwich Method" feedback.</p>
                 {(!apiKey || !selectedModel) && (
                   <p className="text-red-500 text-sm mt-2 font-medium">⚠️ Please connect your API Key and load an AI Model in the "Question Bank" tab first.</p>
                 )}
@@ -722,21 +793,48 @@ export default function App() {
                       className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Student's Answer</label>
+                  
+                  <div className="pt-2 border-t">
+                    <label className="block text-sm font-bold text-gray-700 mb-2">Student's Answer</label>
+                    
+                    {/* Text Input */}
                     <textarea 
                       value={studentAnswer}
                       onChange={(e) => setStudentAnswer(e.target.value)}
-                      placeholder="Paste what the student wrote here..."
-                      rows="6"
-                      required
-                      className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      placeholder="Type or paste student answer here..."
+                      rows="4"
+                      className="w-full p-3 mb-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
                     />
+
+                    {/* File Upload Area */}
+                    <div className="flex items-center space-x-3">
+                      <label className="cursor-pointer bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium py-2 px-4 rounded transition-colors inline-flex items-center border">
+                        <Upload className="w-4 h-4 mr-2 text-gray-500" />
+                        {studentFile ? 'Change File' : 'Upload Image or PDF'}
+                        <input 
+                          type="file" 
+                          accept=".pdf, image/png, image/jpeg, image/jpg" 
+                          onChange={handleGraderFileUpload} 
+                          className="hidden" 
+                        />
+                      </label>
+                      
+                      {studentFile && (
+                        <div className="flex items-center text-sm text-blue-700 bg-blue-50 px-3 py-1.5 rounded-full border border-blue-200">
+                          {studentFileType === 'pdf' ? <FileText className="w-4 h-4 mr-1"/> : <FileImage className="w-4 h-4 mr-1"/>}
+                          <span className="truncate max-w-[120px] mr-2">{studentFile.name}</span>
+                          <button type="button" onClick={clearGraderFile} className="hover:text-red-500">
+                            <X className="w-4 h-4"/>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
+
                   <button 
                     type="submit" 
                     disabled={isGrading || !apiKey || !selectedModel}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg shadow-sm transition-colors flex justify-center items-center disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg shadow-sm transition-colors flex justify-center items-center mt-6 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isGrading ? (
                       <><RefreshCw className="w-5 h-5 mr-2 animate-spin" /> Evaluating Answer...</>
