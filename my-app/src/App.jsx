@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Upload, Plus, RefreshCw, Send, FileSpreadsheet, 
-  Trash2, CheckCircle, Settings, Users, BookOpen, Download
+  Trash2, CheckCircle, Settings, Users, BookOpen, Download, Sparkles, Server, ClipboardCheck
 } from 'lucide-react';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('bank');
@@ -13,14 +14,26 @@ export default function App() {
   const [assignmentConfig, setAssignmentConfig] = useState({ MCQ: 4, Short: 4, Long: 2 });
   const [assignments, setAssignments] = useState([]);
   
-  // Form State
+  // Form State - Manual Add
   const [newQuestionType, setNewQuestionType] = useState('MCQ');
   const [newQuestionText, setNewQuestionText] = useState('');
-  
-  // New State for MCQ Options
   const [mcqOptions, setMcqOptions] = useState(['', '', '', '']);
   const [correctOptionIndex, setCorrectOptionIndex] = useState(0);
+
+  // Form State - AI Generation
+  const [apiKey, setApiKey] = useState('');
+  const [availableModels, setAvailableModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState('');
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [sourceText, setSourceText] = useState('');
+  const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   
+  // Form State - AI Grader
+  const [gradingQuestion, setGradingQuestion] = useState('');
+  const [studentAnswer, setStudentAnswer] = useState('');
+  const [gradingResult, setGradingResult] = useState(null);
+  const [isGrading, setIsGrading] = useState(false);
+
   // Google Classroom Simulation State
   const [googleAuthStatus, setGoogleAuthStatus] = useState('disconnected');
   const [exportStatus, setExportStatus] = useState('');
@@ -34,6 +47,154 @@ export default function App() {
     return () => document.body.removeChild(script);
   }, []);
 
+  // --- Handlers for AI Models & Generation ---
+
+  const handleFetchModels = async (e) => {
+    e.preventDefault();
+    if (!apiKey.trim()) return alert("Please enter your API key first.");
+    
+    setIsLoadingModels(true);
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      
+      if (!response.ok) {
+        let errMsg = "Invalid API Key or Google server issue.";
+        try {
+          const errData = await response.json();
+          if (errData.error && errData.error.message) {
+            errMsg = errData.error.message;
+          }
+        } catch (parseErr) {}
+        throw new Error(errMsg);
+      }
+      
+      const data = await response.json();
+      const textModels = data.models.filter(model => 
+        model.supportedGenerationMethods.includes('generateContent')
+      );
+      
+      setAvailableModels(textModels);
+      
+      if (textModels.length > 0) {
+        setSelectedModel(textModels[0].name.replace('models/', ''));
+      }
+      
+    } catch (error) {
+      console.error("Error fetching models:", error);
+      alert(`Could not fetch models: ${error.message}\n\nFalling back to a default list of models.`);
+      const fallbackModels = [
+        { name: 'models/gemini-1.5-flash-latest', displayName: 'Gemini 1.5 Flash (Latest)' },
+        { name: 'models/gemini-1.5-pro-latest', displayName: 'Gemini 1.5 Pro (Latest)' },
+        { name: 'models/gemini-2.5-flash-preview-09-2025', displayName: 'Gemini 2.5 Flash Preview' }
+      ];
+      setAvailableModels(fallbackModels);
+      setSelectedModel('gemini-1.5-flash-latest');
+    } finally {
+      setIsLoadingModels(false);
+    }
+  };
+
+  const handleGenerateAIQuestions = async (e) => {
+    e.preventDefault();
+    if (!apiKey.trim()) return alert("Please enter your Gemini API Key.");
+    if (!selectedModel) return alert("Please fetch and select an AI model first.");
+    if (!sourceText.trim()) return alert("Please enter some text or a topic for the AI to read.");
+
+    setIsGeneratingAI(true);
+
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: selectedModel });
+
+      const prompt = `
+        You are an expert teacher creating a question bank. Read the following text and generate exactly 5 questions based on it: 2 MCQs, 2 Short Answers, and 1 Long Answer.
+        
+        You MUST return ONLY a valid JSON array. Do not include markdown formatting like \`\`\`json. 
+        Format your response EXACTLY like this example:
+        [
+          { "type": "MCQ", "text": "What is the main concept? \nA) Concept 1 | B) Concept 2 | C) Concept 3 | D) Concept 4\n(Correct: B)" },
+          { "type": "Short", "text": "Explain the process in two sentences." },
+          { "type": "Long", "text": "Discuss the implications of this theory in detail." }
+        ]
+
+        Here is the source text to read:
+        "${sourceText}"
+      `;
+
+      const result = await model.generateContent(prompt);
+      let responseText = result.response.text();
+      
+      responseText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      const aiQuestions = JSON.parse(responseText);
+      
+      const formattedAiQuestions = aiQuestions.map((q, index) => ({
+        id: `ai-${Date.now()}-${index}`,
+        type: q.type,
+        text: q.text
+      }));
+
+      setQuestions([...questions, ...formattedAiQuestions]);
+      setSourceText(''); 
+      alert(`AI successfully generated 5 questions using ${selectedModel}!`);
+
+    } catch (error) {
+      console.error(error);
+      alert(`Error generating questions: ${error.message}\n\nPlease ensure the selected model works and try again.`);
+    } finally {
+      setIsGeneratingAI(false);
+    }
+  };
+
+  // --- Handler for AI Auto-Grader ---
+  
+  const handleGradeAnswer = async (e) => {
+    e.preventDefault();
+    if (!apiKey.trim()) return alert("Please enter your Gemini API Key in the Question Bank tab first.");
+    if (!selectedModel) return alert("Please fetch and select an AI model in the Question Bank tab first.");
+    if (!gradingQuestion.trim() || !studentAnswer.trim()) return alert("Please enter both a question and the student's answer.");
+
+    setIsGrading(true);
+    setGradingResult(null);
+
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: selectedModel });
+
+      const prompt = `
+        You are a supportive, expert teacher grading a student's answer.
+        
+        Question asked: "${gradingQuestion}"
+        Student's answer: "${studentAnswer}"
+
+        Evaluate the answer out of 10 points. Provide feedback using the "Sandwich Method" (Appreciation, Correction, Encouragement).
+        
+        You MUST return ONLY a valid JSON object. Do not include markdown formatting like \`\`\`json.
+        Format your response EXACTLY like this example:
+        {
+          "score": "8.5",
+          "appreciation": "I really like how you clearly identified the main theme.",
+          "correction": "However, you missed mentioning the second key factor which is crucial.",
+          "encouragement": "Great effort overall, keep up the good work and focus on including all details next time!"
+        }
+      `;
+
+      const result = await model.generateContent(prompt);
+      let responseText = result.response.text();
+      
+      responseText = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      const feedback = JSON.parse(responseText);
+      setGradingResult(feedback);
+
+    } catch (error) {
+      console.error(error);
+      alert(`Error grading answer: ${error.message}\n\nPlease check your API key and try again.`);
+    } finally {
+      setIsGrading(false);
+    }
+  };
+
   // --- Handlers for Question Bank ---
 
   const handleAddQuestionManually = (e) => {
@@ -42,7 +203,6 @@ export default function App() {
     
     let finalQuestionText = newQuestionText;
     
-    // If it's an MCQ, format the text to include the options nicely
     if (newQuestionType === 'MCQ') {
       const labels = ['A', 'B', 'C', 'D'];
       finalQuestionText = `${newQuestionText}\n` + 
@@ -61,7 +221,6 @@ export default function App() {
     
     setQuestions([...questions, newQ]);
     
-    // Reset form
     setNewQuestionText('');
     setMcqOptions(['', '', '', '']);
     setCorrectOptionIndex(0);
@@ -93,7 +252,6 @@ export default function App() {
         const importedQuestions = json.map((row, index) => {
           let text = row.Question || row.Text || row.text || "Missing Question Text";
           
-          // Format imported MCQs if options are provided in columns like Option1, Option2...
           if (row.Type === 'MCQ' && row.Option1) {
             text = `${text}\nA) ${row.Option1} | B) ${row.Option2} | C) ${row.Option3} | D) ${row.Option4}\n(Correct: ${row.CorrectOption})`;
           }
@@ -113,13 +271,12 @@ export default function App() {
       }
     };
     reader.readAsBinaryString(file);
-    e.target.value = null; // reset file input
+    e.target.value = null;
   };
 
   const downloadSampleExcel = () => {
     if (!window.XLSX) return alert("Excel library is still loading, please wait a second.");
     
-    // Create some dummy data that matches our required format
     const sampleData = [
       { Type: "MCQ", Question: "What is the capital of France?", Option1: "London", Option2: "Berlin", Option3: "Paris", Option4: "Madrid", CorrectOption: "C" },
       { Type: "Short", Question: "Explain the process of photosynthesis in 3 sentences." },
@@ -130,7 +287,6 @@ export default function App() {
     const workbook = window.XLSX.utils.book_new();
     window.XLSX.utils.book_append_sheet(workbook, worksheet, "QuestionBank");
     
-    // Trigger the download
     window.XLSX.writeFile(workbook, "Sample_Question_Bank_Template.xlsx");
   };
 
@@ -191,41 +347,48 @@ export default function App() {
   // --- UI Renderers ---
 
   const renderTabs = () => (
-    <div className="flex space-x-1 bg-blue-900/10 p-1 rounded-lg mb-6">
+    <div className="flex flex-wrap md:flex-nowrap space-x-1 bg-blue-900/10 p-1 rounded-lg mb-6">
       <button 
         onClick={() => setActiveTab('bank')}
-        className={`flex-1 flex items-center justify-center py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'bank' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
+        className={`flex-1 flex items-center justify-center py-2 px-2 md:px-4 rounded-md text-xs md:text-sm font-medium transition-colors ${activeTab === 'bank' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
       >
-        <BookOpen className="w-4 h-4 mr-2" />
-        Question Bank ({questions.length})
+        <BookOpen className="w-4 h-4 mr-1 md:mr-2" />
+        <span className="hidden md:inline">Question</span> Bank ({questions.length})
       </button>
       <button 
         onClick={() => setActiveTab('generate')}
-        className={`flex-1 flex items-center justify-center py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'generate' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
+        className={`flex-1 flex items-center justify-center py-2 px-2 md:px-4 rounded-md text-xs md:text-sm font-medium transition-colors ${activeTab === 'generate' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
       >
-        <Settings className="w-4 h-4 mr-2" />
+        <Settings className="w-4 h-4 mr-1 md:mr-2" />
         Generate
       </button>
       <button 
         onClick={() => setActiveTab('assignments')}
-        className={`flex-1 flex items-center justify-center py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'assignments' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
+        className={`flex-1 flex items-center justify-center py-2 px-2 md:px-4 rounded-md text-xs md:text-sm font-medium transition-colors ${activeTab === 'assignments' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
       >
-        <Users className="w-4 h-4 mr-2" />
+        <Users className="w-4 h-4 mr-1 md:mr-2" />
         Assignments ({assignments.length})
       </button>
       <button 
-        onClick={() => setActiveTab('export')}
-        className={`flex-1 flex items-center justify-center py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'export' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
+        onClick={() => setActiveTab('grader')}
+        className={`flex-1 flex items-center justify-center py-2 px-2 md:px-4 rounded-md text-xs md:text-sm font-medium transition-colors ${activeTab === 'grader' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
       >
-        <Send className="w-4 h-4 mr-2" />
-        Google Classroom
+        <ClipboardCheck className="w-4 h-4 mr-1 md:mr-2" />
+        AI Grader
+      </button>
+      <button 
+        onClick={() => setActiveTab('export')}
+        className={`flex-1 flex items-center justify-center py-2 px-2 md:px-4 rounded-md text-xs md:text-sm font-medium transition-colors ${activeTab === 'export' ? 'bg-white text-blue-700 shadow' : 'text-gray-600 hover:text-blue-900'}`}
+      >
+        <Send className="w-4 h-4 mr-1 md:mr-2" />
+        <span className="hidden md:inline">Google</span> Classroom
       </button>
     </div>
   );
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-800 font-sans p-6">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-5xl mx-auto">
         
         {/* Header */}
         <header className="mb-8 text-center">
@@ -240,6 +403,92 @@ export default function App() {
           {/* TAB 1: QUESTION BANK */}
           {activeTab === 'bank' && (
             <div className="space-y-8">
+              
+              {/* AI Generation Form */}
+              <div className="bg-purple-50 p-5 rounded-xl border border-purple-200">
+                <h3 className="text-lg font-bold text-purple-900 mb-2 flex items-center">
+                  <Sparkles className="w-5 h-5 mr-2 text-purple-600"/> Setup AI & Generate Questions
+                </h3>
+                <p className="text-sm text-purple-700 mb-4">Paste your API key here first. This key will power both the Question Generator and the AI Grader.</p>
+                
+                <div className="space-y-4">
+                  {/* API Key and Fetch Row */}
+                  <div className="flex flex-col md:flex-row gap-4 items-end">
+                    <div className="md:w-1/2">
+                      <label className="block text-xs font-bold text-purple-800 mb-1 uppercase tracking-wider">Gemini API Key</label>
+                      <input 
+                        type="password" 
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder="Paste key here..."
+                        className="w-full p-2 border border-purple-300 rounded focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
+                      />
+                    </div>
+                    <button 
+                      onClick={handleFetchModels}
+                      disabled={isLoadingModels}
+                      className="bg-purple-200 hover:bg-purple-300 text-purple-800 font-bold py-2 px-4 rounded transition-colors flex items-center h-[38px] disabled:opacity-50"
+                    >
+                      {isLoadingModels ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Server className="w-4 h-4 mr-2" />}
+                      Fetch Models
+                    </button>
+                  </div>
+
+                  {/* AI Model Dropdown (Only shows if models are loaded) */}
+                  {availableModels.length > 0 && (
+                    <form onSubmit={handleGenerateAIQuestions} className="space-y-4 pt-4 border-t border-purple-200">
+                      <div className="flex flex-col md:flex-row gap-4">
+                        <div className="md:w-1/3">
+                          <label className="block text-xs font-bold text-purple-800 mb-1 uppercase tracking-wider">Select AI Model</label>
+                          <select 
+                            value={selectedModel}
+                            onChange={(e) => setSelectedModel(e.target.value)}
+                            className="w-full p-2 border border-purple-300 rounded focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
+                            required
+                          >
+                            {availableModels.map(model => {
+                              const cleanName = model.name.replace('models/', '');
+                              return (
+                                <option key={cleanName} value={cleanName}>
+                                  {model.displayName} ({cleanName})
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </div>
+
+                        <div className="md:w-2/3">
+                          <label className="block text-xs font-bold text-purple-800 mb-1 uppercase tracking-wider">Topic / Source Text</label>
+                          <textarea 
+                            value={sourceText}
+                            onChange={(e) => setSourceText(e.target.value)}
+                            placeholder="E.g., The water cycle describes how water evaporates..."
+                            rows="2"
+                            className="w-full p-2 border border-purple-300 rounded focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
+                            required
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="flex justify-end">
+                        <button 
+                          type="submit" 
+                          disabled={isGeneratingAI}
+                          className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-6 rounded-lg transition-colors flex items-center disabled:opacity-50 shadow-sm"
+                        >
+                          {isGeneratingAI ? (
+                            <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Thinking...</>
+                          ) : (
+                            <><Sparkles className="w-4 h-4 mr-2" /> Create 5 Questions</>
+                          )}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              </div>
+
+              {/* Add Manually and Excel Row */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 
                 {/* Manual Entry Form */}
@@ -251,7 +500,7 @@ export default function App() {
                       <select 
                         value={newQuestionType}
                         onChange={(e) => setNewQuestionType(e.target.value)}
-                        className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none"
+                        className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none bg-white"
                       >
                         <option value="MCQ">Multiple Choice (MCQ)</option>
                         <option value="Short">Short Answer</option>
@@ -271,7 +520,6 @@ export default function App() {
                       />
                     </div>
 
-                    {/* NEW: Dynamic MCQ Options Form */}
                     {newQuestionType === 'MCQ' && (
                       <div className="bg-white p-3 rounded border border-blue-200 space-y-3">
                         <label className="block text-xs font-bold text-gray-500 uppercase">Options (Select correct answer)</label>
@@ -298,7 +546,7 @@ export default function App() {
                       </div>
                     )}
 
-                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded transition-colors">
+                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded transition-colors shadow-sm">
                       Add Question
                     </button>
                   </form>
@@ -311,13 +559,12 @@ export default function App() {
                   <p className="text-sm text-gray-600 mb-4">Ensure your file has two columns named <strong>Type</strong> (MCQ, Short, Long) and <strong>Question</strong>.</p>
                   
                   <div className="flex flex-col space-y-3 w-full px-4">
-                    <label className="cursor-pointer w-full justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded transition-colors inline-flex items-center">
+                    <label className="cursor-pointer w-full justify-center bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-6 rounded transition-colors inline-flex items-center shadow-sm">
                       <Upload className="w-4 h-4 mr-2" />
                       Browse Files
                       <input type="file" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} className="hidden" />
                     </label>
                     
-                    {/* NEW: Download Sample Button */}
                     <button 
                       onClick={downloadSampleExcel}
                       className="text-green-700 hover:text-green-800 text-sm font-medium flex items-center justify-center py-2 hover:bg-green-100 rounded transition-colors"
@@ -372,7 +619,7 @@ export default function App() {
                     min="1"
                     value={numStudents}
                     onChange={(e) => setNumStudents(parseInt(e.target.value) || 1)}
-                    className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none text-lg"
+                    className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 outline-none text-lg bg-white"
                   />
                 </div>
 
@@ -383,21 +630,21 @@ export default function App() {
                     <span className="text-sm text-gray-600 flex items-center">
                       <span className="w-3 h-3 rounded-full bg-purple-500 mr-2"></span> MCQs
                     </span>
-                    <input type="number" min="0" value={assignmentConfig.MCQ} onChange={(e) => setAssignmentConfig({...assignmentConfig, MCQ: parseInt(e.target.value) || 0})} className="w-20 p-1 border rounded text-center" />
+                    <input type="number" min="0" value={assignmentConfig.MCQ} onChange={(e) => setAssignmentConfig({...assignmentConfig, MCQ: parseInt(e.target.value) || 0})} className="w-20 p-1 border rounded text-center bg-white" />
                   </div>
                   
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600 flex items-center">
                       <span className="w-3 h-3 rounded-full bg-orange-500 mr-2"></span> Short Answers
                     </span>
-                    <input type="number" min="0" value={assignmentConfig.Short} onChange={(e) => setAssignmentConfig({...assignmentConfig, Short: parseInt(e.target.value) || 0})} className="w-20 p-1 border rounded text-center" />
+                    <input type="number" min="0" value={assignmentConfig.Short} onChange={(e) => setAssignmentConfig({...assignmentConfig, Short: parseInt(e.target.value) || 0})} className="w-20 p-1 border rounded text-center bg-white" />
                   </div>
                   
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600 flex items-center">
                       <span className="w-3 h-3 rounded-full bg-blue-500 mr-2"></span> Long Answers
                     </span>
-                    <input type="number" min="0" value={assignmentConfig.Long} onChange={(e) => setAssignmentConfig({...assignmentConfig, Long: parseInt(e.target.value) || 0})} className="w-20 p-1 border rounded text-center" />
+                    <input type="number" min="0" value={assignmentConfig.Long} onChange={(e) => setAssignmentConfig({...assignmentConfig, Long: parseInt(e.target.value) || 0})} className="w-20 p-1 border rounded text-center bg-white" />
                   </div>
                 </div>
               </div>
@@ -447,7 +694,105 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 4: GOOGLE CLASSROOM EXPORT */}
+          {/* TAB 4: AI GRADER */}
+          {activeTab === 'grader' && (
+            <div className="max-w-4xl mx-auto space-y-6">
+              <div className="text-center mb-6">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 text-blue-600 mb-4">
+                  <ClipboardCheck className="w-8 h-8" />
+                </div>
+                <h2 className="text-2xl font-bold text-gray-800 mb-2">AI Auto-Grader</h2>
+                <p className="text-gray-600">Paste a student's answer below to get instant "Sandwich Method" feedback.</p>
+                {(!apiKey || !selectedModel) && (
+                  <p className="text-red-500 text-sm mt-2 font-medium">⚠️ Please connect your API Key and load an AI Model in the "Question Bank" tab first.</p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Input Column */}
+                <form onSubmit={handleGradeAnswer} className="space-y-4 bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">The Question</label>
+                    <textarea 
+                      value={gradingQuestion}
+                      onChange={(e) => setGradingQuestion(e.target.value)}
+                      placeholder="What was the original question?"
+                      rows="2"
+                      required
+                      className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">Student's Answer</label>
+                    <textarea 
+                      value={studentAnswer}
+                      onChange={(e) => setStudentAnswer(e.target.value)}
+                      placeholder="Paste what the student wrote here..."
+                      rows="6"
+                      required
+                      className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                    />
+                  </div>
+                  <button 
+                    type="submit" 
+                    disabled={isGrading || !apiKey || !selectedModel}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg shadow-sm transition-colors flex justify-center items-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isGrading ? (
+                      <><RefreshCw className="w-5 h-5 mr-2 animate-spin" /> Evaluating Answer...</>
+                    ) : (
+                      <><Sparkles className="w-5 h-5 mr-2" /> Generate Feedback</>
+                    )}
+                  </button>
+                </form>
+
+                {/* Output Column */}
+                <div className="bg-gray-50 p-6 rounded-xl border border-gray-200 flex flex-col h-full">
+                  <h3 className="text-lg font-bold text-gray-800 mb-4 border-b pb-2">Grading Result</h3>
+                  
+                  {!gradingResult && !isGrading && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
+                      <ClipboardCheck className="w-12 h-12 mb-2 opacity-50" />
+                      <p className="text-sm">Feedback will appear here.</p>
+                    </div>
+                  )}
+
+                  {isGrading && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-blue-600">
+                      <RefreshCw className="w-8 h-8 animate-spin mb-4" />
+                      <p className="font-medium animate-pulse">AI is reading the answer...</p>
+                    </div>
+                  )}
+
+                  {gradingResult && !isGrading && (
+                    <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                      <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm text-center">
+                        <p className="text-sm text-gray-500 font-bold uppercase tracking-wider mb-1">Suggested Score</p>
+                        <p className="text-4xl font-black text-blue-600">{gradingResult.score}<span className="text-xl text-gray-400">/10</span></p>
+                      </div>
+                      
+                      <div className="space-y-3">
+                        <div className="bg-green-50 p-3 rounded-lg border border-green-100">
+                          <p className="text-xs font-bold text-green-800 uppercase mb-1">1. Appreciation (What went well)</p>
+                          <p className="text-sm text-green-900">{gradingResult.appreciation}</p>
+                        </div>
+                        <div className="bg-orange-50 p-3 rounded-lg border border-orange-100">
+                          <p className="text-xs font-bold text-orange-800 uppercase mb-1">2. Correction (Needs improvement)</p>
+                          <p className="text-sm text-orange-900">{gradingResult.correction}</p>
+                        </div>
+                        <div className="bg-blue-50 p-3 rounded-lg border border-blue-100">
+                          <p className="text-xs font-bold text-blue-800 uppercase mb-1">3. Encouragement (Moving forward)</p>
+                          <p className="text-sm text-blue-900">{gradingResult.encouragement}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: GOOGLE CLASSROOM EXPORT */}
           {activeTab === 'export' && (
             <div className="max-w-lg mx-auto text-center py-8">
               <img src="https://upload.wikimedia.org/wikipedia/commons/5/59/Google_Classroom_Logo.png" alt="Google Classroom" className="w-20 h-20 mx-auto mb-6 opacity-90" />
