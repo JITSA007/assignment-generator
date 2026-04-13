@@ -40,7 +40,7 @@ export default function App() {
   const [mcqOptions, setMcqOptions] = useState(['', '', '', '']);
   const [correctOptionIndex, setCorrectOptionIndex] = useState(0);
 
-  // Configuration & Branding (Updated per Jitendra's request)
+  // Configuration & Branding
   const [numStudents, setNumStudents] = useState(10);
   const [assignmentConfig, setAssignmentConfig] = useState({ MCQ: 4, Short: 4, Long: 2 });
   const [assignments, setAssignments] = useState([]);
@@ -75,6 +75,7 @@ export default function App() {
   const [selectedCourseId, setSelectedCourseId] = useState('');
   const [exportStatus, setExportStatus] = useState('');
   const [uploadProgress, setUploadProgress] = useState('');
+  const [printingAssignmentId, setPrintingAssignmentId] = useState(null);
 
   // ==========================================
   // EXTERNAL SCRIPT LOADING
@@ -123,6 +124,13 @@ export default function App() {
     const end = text.lastIndexOf(endChar);
     if (start === -1 || end === -1) throw new Error("AI failed to output valid data format. Please try again.");
     return JSON.parse(text.substring(start, end + 1));
+  };
+
+  // THE FIX: Securely create file names with part of their ID so it's always unique
+  const getSafeFileName = (name, id) => {
+    const safeId = id ? String(id).substring(0, 4) : Math.floor(Math.random() * 1000);
+    if (!name || name.includes("____")) return `Assignment_${safeId}`;
+    return `${name.replace(/[^a-zA-Z0-9 ]/g, "").trim()}_${safeId}`;
   };
 
   // ==========================================
@@ -259,8 +267,13 @@ export default function App() {
       const res = await fetch(`https://classroom.googleapis.com/v1/courses/${rosterCourseId}/students`, { headers: { Authorization: `Bearer ${accessToken}` } });
       const data = await res.json();
       if (data.students && data.students.length > 0) {
-        const list = data.students.map(s => ({ id: s.userId, name: s.profile?.name?.fullName || 'Unknown', email: s.profile?.emailAddress || '' }));
-        setClassroomStudents(list); setNumStudents(list.length);
+        // THE FIX: We are extracting the s.userId, NOT the email, to ensure uniqueness.
+        const list = data.students.map(s => ({ 
+          id: s.userId, 
+          name: s.profile?.name?.fullName || 'Unknown' 
+        }));
+        setClassroomStudents(list); 
+        setNumStudents(list.length);
         alert(`Fetched ${list.length} students from Google Classroom!`);
       } else {
         alert("No students found in this course."); setClassroomStudents([]);
@@ -281,29 +294,31 @@ export default function App() {
     const count = classroomStudents.length > 0 ? classroomStudents.length : numStudents;
     for (let i = 0; i < count; i++) {
       const shuffle = (arr, n) => [...arr].sort(() => 0.5 - Math.random()).slice(0, n);
-      const student = classroomStudents[i] || { name: "________________", email: `Student_${i+1}@college.edu` };
+      // THE FIX: Assigning the guaranteed unique student.id instead of an email
+      const student = classroomStudents[i] || { name: "______________________", id: `Guest_${i+1}` };
       result.push({
         studentName: student.name,
-        studentId: student.email.split('@')[0],
+        studentId: student.id,
         questions: [...shuffle(mcq, assignmentConfig.MCQ), ...shuffle(shrt, assignmentConfig.Short), ...shuffle(lng, assignmentConfig.Long)]
       });
     }
     setAssignments(result); setActiveTab('assignments');
   };
 
-  // FIX: This now uses html2pdf to perfectly download only the single student's exam!
   const downloadSingleAssignmentPDF = async (studentId) => {
     const assign = assignments.find(a => a.studentId === studentId);
     if (!assign) return;
     if (!window.html2pdf) return alert("PDF tool is still loading.");
     
-    alert(`Generating PDF for ${assign.studentName || assign.studentId}...`);
+    // Apply our new Safe File Name logic
+    const safeFileName = getSafeFileName(assign.studentName, assign.studentId);
+    alert(`Generating PDF for ${safeFileName}...`);
 
     const el = document.createElement('div');
     const formattedQuestions = assign.questions.map((q, idx) => {
       const formattedText = q.text.replace(/\n/g, '<br/>');
       return `
-        <div style="margin-bottom:24px; font-size:14px;">
+        <div style="margin-bottom:24px; font-size:14px; page-break-inside: avoid;">
           <div style="display:flex;">
             <span style="font-weight:bold; margin-right:8px;">${idx+1}.</span>
             <span style="line-height:1.5">${formattedText}</span>
@@ -325,7 +340,7 @@ export default function App() {
           </div>
           <div style="display:flex; justify-content:space-between; font-size:14px; font-weight:bold; margin-top:16px; padding-top:16px; border-top:1px dashed #d1d5db;">
             <span>Student Name: ${assign.studentName}</span>
-            <span>Roll No / ID: ${assign.studentId}</span>
+            <span>Roll No / ID: ${String(assign.studentId).substring(0,6).toUpperCase()}</span>
           </div>
         </div>
         <div>${formattedQuestions}</div>
@@ -334,7 +349,7 @@ export default function App() {
     
     await window.html2pdf().set({ 
       margin:0.5, 
-      filename: `${assign.studentId}_Exam.pdf`, 
+      filename: `${safeFileName}.pdf`, 
       jsPDF: { unit:'in', format:'letter'} 
     }).from(el).save();
   };
@@ -351,13 +366,14 @@ export default function App() {
       const materialsList = [];
       
       for (const assign of assignments) {
-        setUploadProgress(`Drafting PDF for ${assign.studentName}...`);
+        const safeFileName = getSafeFileName(assign.studentName, assign.studentId);
+        setUploadProgress(`Drafting PDF for ${safeFileName}...`);
         
         const el = document.createElement('div');
         const formattedQuestions = assign.questions.map((q, idx) => {
           const formattedText = q.text.replace(/\n/g, '<br/>');
           return `
-            <div style="margin-bottom:24px; font-size:14px;">
+            <div style="margin-bottom:24px; font-size:14px; page-break-inside: avoid;">
               <div style="display:flex;">
                 <span style="font-weight:bold; margin-right:8px;">${idx+1}.</span>
                 <span style="line-height:1.5">${formattedText}</span>
@@ -379,14 +395,14 @@ export default function App() {
               </div>
               <div style="display:flex; justify-content:space-between; font-size:14px; font-weight:bold; margin-top:16px; padding-top:16px; border-top:1px dashed #d1d5db;">
                 <span>Student Name: ${assign.studentName}</span>
-                <span>Roll No / ID: ${assign.studentId}</span>
+                <span>Roll No / ID: ${String(assign.studentId).substring(0,6).toUpperCase()}</span>
               </div>
             </div>
             <div>${formattedQuestions}</div>
           </div>
         `;
         
-        const blob = await window.html2pdf().set({ margin:0.5, filename: `${assign.studentId}.pdf`, jsPDF: { unit:'in', format:'letter'} }).from(el).output('blob');
+        const blob = await window.html2pdf().set({ margin:0.5, filename: `${safeFileName}.pdf`, jsPDF: { unit:'in', format:'letter'} }).from(el).output('blob');
         const upRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=media', { 
           method:'POST', headers:{ Authorization:`Bearer ${accessToken}`, 'Content-Type':'application/pdf' }, body:blob 
         });
@@ -394,7 +410,7 @@ export default function App() {
         
         await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { 
           method:'PATCH', headers:{ Authorization:`Bearer ${accessToken}`, 'Content-Type':'application/json' }, 
-          body: JSON.stringify({ name: `${assign.studentId}_Assignment.pdf` }) 
+          body: JSON.stringify({ name: `${safeFileName}.pdf` }) 
         });
         
         materialsList.push({ driveFile: { driveFile: { id: fileId }, shareMode: "VIEW" } });
@@ -402,10 +418,10 @@ export default function App() {
 
       setUploadProgress("Drafting to Classroom (Bypassing limits)...");
       
-      const CHUNK_SIZE = 20;
+      const CHUNK_SIZE = 15;
       for (let i = 0; i < materialsList.length; i += CHUNK_SIZE) {
         const chunk = materialsList.slice(i, i + CHUNK_SIZE);
-        const partSuffix = materialsList.length > 20 ? ` (Part ${Math.floor(i/CHUNK_SIZE) + 1})` : '';
+        const partSuffix = materialsList.length > CHUNK_SIZE ? ` (Part ${Math.floor(i/CHUNK_SIZE) + 1})` : '';
         
         const createRes = await fetch(`https://classroom.googleapis.com/v1/courses/${selectedCourseId}/courseWork`, {
           method: 'POST', 
@@ -755,7 +771,7 @@ export default function App() {
                     {assignments.map((as,idx) => (
                        <div key={idx} className="border border-gray-200 rounded-3xl overflow-hidden shadow-sm hover:shadow-xl transition-all bg-white flex flex-col h-[500px]">
                           <div className="bg-slate-800 p-4 flex justify-between items-center">
-                             <span className="text-xs font-black text-white uppercase tracking-widest bg-slate-700 px-3 py-1 rounded-full">{as.studentId}</span>
+                             <span className="text-xs font-black text-white uppercase tracking-widest bg-slate-700 px-3 py-1 rounded-full">{String(as.studentId).substring(0,8).toUpperCase()}</span>
                              <button onClick={() => downloadSingleAssignmentPDF(as.studentId)} className="p-2 px-4 bg-blue-600 text-white border-none rounded-xl text-xs font-black hover:bg-blue-500 transition-colors shadow-sm flex items-center"><Download className="w-4 h-4 mr-2"/> DOWNLOAD PDF</button>
                           </div>
                           <div className="p-8 text-xs text-gray-800 flex-1 overflow-y-auto">
@@ -764,7 +780,7 @@ export default function App() {
                                <h5 className="font-bold text-sm text-gray-500 mb-4">{departmentName}</h5>
                                <div className="flex justify-between font-bold text-gray-800 bg-gray-50 p-3 rounded-xl border">
                                  <span>{as.studentName}</span>
-                                 <span>ID: {as.studentId}</span>
+                                 <span>ID: {String(as.studentId).substring(0,6).toUpperCase()}</span>
                                </div>
                              </div>
                              <div className="space-y-6">
@@ -874,7 +890,7 @@ export default function App() {
                           <div className="p-5 bg-blue-50 border border-blue-200 rounded-2xl shadow-sm focus-within:ring-2 ring-blue-400 transition-all"><p className="text-[10px] font-black uppercase mb-2 text-blue-800 tracking-widest flex items-center"><Sparkles className="w-3 h-3 mr-1"/> Encouragement</p><textarea value={gradingResult.encouragement} onChange={e=>setGradingResult({...gradingResult, encouragement: e.target.value})} className="w-full bg-transparent border-none p-0 focus:ring-0 resize-none font-medium text-blue-900 text-sm leading-relaxed" rows="2"/></div>
                         </div>
                         <div className="pt-5 border-t border-gray-100 grid gap-3 mt-auto">
-                           <button onClick={handleSyncGradeToClassroom} disabled={isSyncingGrade || !activeSubmission} className="w-full bg-green-600 text-white font-black py-4 rounded-2xl hover:bg-green-700 shadow-lg shadow-green-200 active:scale-95 transition-all flex justify-center items-center disabled:opacity-50 uppercase tracking-widest">{isSyncingGrade ? <RefreshCw className="animate-spin mr-3"/> : <Send className="w-5 h-5 mr-3"/>} SYNC SCORE TO GRADEBOOK</button>
+                           <button onClick={handleSyncGradeToClassroom} className="w-full bg-green-600 text-white font-black py-4 rounded-2xl hover:bg-green-700 shadow-lg shadow-green-200 active:scale-95 transition-all flex justify-center items-center disabled:opacity-50 uppercase tracking-widest">{isSyncingGrade ? <RefreshCw className="animate-spin mr-3"/> : <Send className="w-5 h-5 mr-3"/>} SYNC SCORE TO GRADEBOOK</button>
                            <button onClick={copyFeedbackToClipboard} className="w-full bg-gray-100 text-gray-700 font-black py-3 rounded-2xl border border-gray-200 hover:bg-gray-200 active:scale-95 transition-all flex justify-center items-center uppercase tracking-widest"><Copy className="w-4 h-4 mr-2"/> COPY FULL REMARKS</button>
                         </div>
                       </div>
