@@ -126,7 +126,6 @@ export default function App() {
     return JSON.parse(text.substring(start, end + 1));
   };
 
-  // THE FIX: Securely create file names with part of their ID so it's always unique
   const getSafeFileName = (name, id) => {
     const safeId = id ? String(id).substring(0, 4) : Math.floor(Math.random() * 1000);
     if (!name || name.includes("____")) return `Assignment_${safeId}`;
@@ -258,27 +257,42 @@ export default function App() {
   };
 
   // ==========================================
-  // SETUP & GENERATION LOGIC
+  // SETUP & GENERATION LOGIC (WITH PAGINATION FIX)
   // ==========================================
   const handleFetchStudents = async () => {
     if (!rosterCourseId) return;
     setIsFetchingStudents(true);
     try {
-      const res = await fetch(`https://classroom.googleapis.com/v1/courses/${rosterCourseId}/students`, { headers: { Authorization: `Bearer ${accessToken}` } });
-      const data = await res.json();
-      if (data.students && data.students.length > 0) {
-        // THE FIX: We are extracting the s.userId, NOT the email, to ensure uniqueness.
-        const list = data.students.map(s => ({ 
+      let allStudents = [];
+      let pageToken = '';
+      
+      // FIX: Loop through all pages of students to bypass the 30-limit
+      do {
+        const url = `https://classroom.googleapis.com/v1/courses/${rosterCourseId}/students?pageSize=100${pageToken ? `&pageToken=${pageToken}` : ''}`;
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const data = await res.json();
+        
+        if (data.students) {
+          allStudents = [...allStudents, ...data.students];
+        }
+        pageToken = data.nextPageToken; // Move to the next page if it exists
+      } while (pageToken);
+
+      if (allStudents.length > 0) {
+        const list = allStudents.map(s => ({ 
           id: s.userId, 
           name: s.profile?.name?.fullName || 'Unknown' 
         }));
         setClassroomStudents(list); 
         setNumStudents(list.length);
-        alert(`Fetched ${list.length} students from Google Classroom!`);
+        alert(`Successfully fetched ALL ${list.length} students from Google Classroom!`);
       } else {
-        alert("No students found in this course."); setClassroomStudents([]);
+        alert("No students found in this course."); 
+        setClassroomStudents([]);
       }
-    } catch (e) { alert("Failed to fetch roster."); }
+    } catch (e) { 
+      alert("Failed to fetch roster."); 
+    }
     setIsFetchingStudents(false);
   };
 
@@ -294,7 +308,6 @@ export default function App() {
     const count = classroomStudents.length > 0 ? classroomStudents.length : numStudents;
     for (let i = 0; i < count; i++) {
       const shuffle = (arr, n) => [...arr].sort(() => 0.5 - Math.random()).slice(0, n);
-      // THE FIX: Assigning the guaranteed unique student.id instead of an email
       const student = classroomStudents[i] || { name: "______________________", id: `Guest_${i+1}` };
       result.push({
         studentName: student.name,
@@ -310,7 +323,6 @@ export default function App() {
     if (!assign) return;
     if (!window.html2pdf) return alert("PDF tool is still loading.");
     
-    // Apply our new Safe File Name logic
     const safeFileName = getSafeFileName(assign.studentName, assign.studentId);
     alert(`Generating PDF for ${safeFileName}...`);
 
@@ -447,12 +459,12 @@ export default function App() {
   };
 
   // ==========================================
-  // SMART GRADER LOGIC
+  // SMART GRADER LOGIC (WITH PAGINATION FIX)
   // ==========================================
   const fetchClassroomAssignmentsForGrader = async () => {
     if (!graderCourseId) return;
     try {
-      const res = await fetch(`https://classroom.googleapis.com/v1/courses/${graderCourseId}/courseWork`, { headers: { Authorization: `Bearer ${accessToken}` } });
+      const res = await fetch(`https://classroom.googleapis.com/v1/courses/${graderCourseId}/courseWork?pageSize=100`, { headers: { Authorization: `Bearer ${accessToken}` } });
       const data = await res.json();
       if (data.courseWork) {
         setGraderAssignmentsList(data.courseWork);
@@ -466,9 +478,22 @@ export default function App() {
     if (!graderSelectedAssignmentId) return;
     setIsFetchingSubmissions(true);
     try {
-      const res = await fetch(`https://classroom.googleapis.com/v1/courses/${graderCourseId}/courseWork/${graderSelectedAssignmentId}/studentSubmissions`, { headers: { Authorization: `Bearer ${accessToken}` } });
-      const data = await res.json();
-      setGraderSubmissionsList(data.studentSubmissions || []);
+      let allSubmissions = [];
+      let pageToken = '';
+      
+      // FIX: Loop to fetch ALL submissions for grading
+      do {
+        const url = `https://classroom.googleapis.com/v1/courses/${graderCourseId}/courseWork/${graderSelectedAssignmentId}/studentSubmissions?pageSize=100${pageToken ? `&pageToken=${pageToken}` : ''}`;
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+        const data = await res.json();
+        
+        if (data.studentSubmissions) {
+          allSubmissions = [...allSubmissions, ...data.studentSubmissions];
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+      
+      setGraderSubmissionsList(allSubmissions);
     } catch (e) { alert("Failed to fetch submissions."); }
     setIsFetchingSubmissions(false);
   };
